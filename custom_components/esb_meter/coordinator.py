@@ -37,8 +37,11 @@ def _parse_local_dt(local_time: str) -> datetime.datetime:
     return _TZ_DUBLIN.localize(dt).astimezone(pytz.utc)
 
 
-def _fetch_esb_data(username: str, password: str, mprn: str) -> list[dict[str, Any]]:
-    """Blocking function: log in to ESB Networks and download HDF CSV data."""
+def _create_session(username: str, password: str) -> requests.Session:
+    """Log in to ESB Networks and return an authenticated session.
+
+    Raises UpdateFailed on any login error.
+    """
     s = requests.Session()
     s.headers.update({
         "User-Agent": (
@@ -48,12 +51,20 @@ def _fetch_esb_data(username: str, password: str, mprn: str) -> list[dict[str, A
         ),
     })
 
+    _LOGGER.debug("Fetching ESB login page")
     login_page = s.get("https://myaccount.esbnetworks.ie/", allow_redirects=True)
     result = re.findall(r"(?<=var SETTINGS = )\S*;", login_page.text)
     if not result:
+        _LOGGER.error("Could not find SETTINGS variable on ESB login page. Page status: %s", login_page.status_code)
         raise UpdateFailed("Could not find SETTINGS on ESB login page")
-    settings = json.loads(result[0][:-1])
 
+    try:
+        settings = json.loads(result[0][:-1])
+    except json.JSONDecodeError as err:
+        _LOGGER.error("Failed to parse SETTINGS JSON: %s", err)
+        raise UpdateFailed(f"Failed to parse ESB login settings: {err}") from err
+
+    _LOGGER.debug("Submitting credentials")
     s.post(
         "https://login.esbnetworks.ie/esbntwkscustportalprdb2c01.onmicrosoft.com"
         "/B2C_1A_signup_signin/SelfAsserted"
@@ -67,6 +78,7 @@ def _fetch_esb_data(username: str, password: str, mprn: str) -> list[dict[str, A
         allow_redirects=False,
     )
 
+    _LOGGER.debug("Confirming login")
     confirm_login = s.get(
         "https://login.esbnetworks.ie/esbntwkscustportalprdb2c01.onmicrosoft.com"
         "/B2C_1A_signup_signin/api/CombinedSigninAndSignup/confirmed",
@@ -81,7 +93,12 @@ def _fetch_esb_data(username: str, password: str, mprn: str) -> list[dict[str, A
     soup = BeautifulSoup(confirm_login.content, "html.parser")
     form = soup.find("form", {"id": "auto"})
     if form is None:
-        raise UpdateFailed("Login failed: could not find redirect form. Check credentials.")
+        _LOGGER.error(
+            "Login failed: no redirect form found in response (status %s). "
+            "Credentials may be incorrect.",
+            confirm_login.status_code,
+        )
+        raise UpdateFailed("Login failed: check your ESB username and password.")
 
     s.post(
         form["action"],
@@ -93,16 +110,36 @@ def _fetch_esb_data(username: str, password: str, mprn: str) -> list[dict[str, A
         },
     )
 
+    _LOGGER.debug("ESB login successful")
+    return s
+
+
+def validate_credentials(username: str, password: str) -> None:
+    """Lightweight credential check — just logs in, no data download.
+
+    Raises UpdateFailed if login fails.
+    """
+    _create_session(username, password)
+
+
+def _fetch_esb_data(username: str, password: str, mprn: str) -> list[dict[str, Any]]:
+    """Log in and download the full HDF CSV data for the given MPRN."""
+    s = _create_session(username, password)
+
     today = datetime.date.today().strftime("%Y-%m-%d")
+    _LOGGER.debug("Downloading HDF data for MPRN %s", mprn)
     data = s.get(
         f"https://myaccount.esbnetworks.ie/DataHub/DownloadHdf"
         f"?mprn={mprn}&startDate={today}"
     )
     if not data.ok:
+        _LOGGER.error("HDF download failed: HTTP %s", data.status_code)
         raise UpdateFailed(f"Failed to download HDF data: HTTP {data.status_code}")
 
     reader = csv.DictReader(StringIO(data.content.decode("utf-8")))
-    return list(reader)
+    records = list(reader)
+    _LOGGER.debug("Downloaded %d records from ESB", len(records))
+    return records
 
 
 class EsbMeterCoordinator(DataUpdateCoordinator):
@@ -128,14 +165,14 @@ class EsbMeterCoordinator(DataUpdateCoordinator):
         except UpdateFailed:
             raise
         except Exception as err:
-            raise UpdateFailed(f"Unexpected error fetching ESB data: {err}") from err
+            _LOGGER.exception("Unexpected error fetching ESB data")
+            raise UpdateFailed(f"Unexpected error: {err}") from err
 
         await self._async_push_statistics(records)
 
     async def _async_push_statistics(self, records: list[dict[str, Any]]) -> None:
         """Convert records to HA StatisticData and push via async_add_external_statistics."""
 
-        # Find the timestamp of the last statistic already stored so we can skip old data.
         last_stats = await get_instance(self.hass).async_add_executor_job(
             get_last_statistics, self.hass, 1, STATISTIC_ID, True, {"sum"}
         )

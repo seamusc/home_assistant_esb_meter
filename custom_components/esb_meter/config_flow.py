@@ -9,7 +9,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.selector import TextSelector, TextSelectorConfig, TextSelectorType
 
 from .const import CONF_MPRN, DOMAIN
-from .coordinator import UpdateFailed, _fetch_esb_data
+from .coordinator import UpdateFailed, validate_credentials
 
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
@@ -21,9 +21,9 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
 
 
 async def _validate_credentials(hass: HomeAssistant, data: dict) -> None:
-    """Attempt a real login to ESB to validate credentials. Raises UpdateFailed on failure."""
+    """Attempt a login to ESB to validate credentials. Raises UpdateFailed on failure."""
     await hass.async_add_executor_job(
-        _fetch_esb_data, data[CONF_USERNAME], data[CONF_PASSWORD], data[CONF_MPRN]
+        validate_credentials, data[CONF_USERNAME], data[CONF_PASSWORD]
     )
 
 
