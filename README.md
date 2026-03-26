@@ -19,7 +19,7 @@ A Home Assistant custom integration that scrapes half-hourly electricity usage d
 ### Via HACS (recommended)
 
 1. In HACS, go to **Integrations → Custom Repositories**
-2. Add this repository URL with category **Integration**
+2. Add `https://github.com/seamusc/home_assistant_esb_meter` with category **Integration**
 3. Search for "ESB Meter" and install
 4. Restart Home Assistant
 
